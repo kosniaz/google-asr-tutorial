@@ -56,6 +56,8 @@ for item in a:
 
 ### Step 3: using all the above steps to create a script that performs streaming recognition.
 
+(https://cloud.google.com/speech-to-text/docs/streaming-recognize#performing_streaming_speech_recognition_on_an_audio_stream)
+
 ## The problem of transcribing a (relatively) long speech track
 
 ### Method 1: Using long-running recognition
