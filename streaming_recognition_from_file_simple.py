@@ -23,13 +23,12 @@ import google
 import traceback
 
 
-''' This script takes a single channel wav file as an argument, and
-    streams it to google for transcribing 
-    It can be used with flag --no_interim.
+''' This script takes a stereo wav file as an argument, and
+    streams it to google for transcribing.
     
     Here we instantiate an ASR client. Then main() calls method run().
     In essence, this method activates the client. It spawns two processes.
-    One (run_record_and_send() ) is for sending the audio chunk by chunk between 100ms intervals.
+    One (simulate_record_and_store_in_buffer() ) is for sending the audio chunk by chunk between 100ms intervals.
     The other (run_receive_and_print) is for handling the incoming responses from the asr server.
 
     Arguments:
@@ -47,6 +46,7 @@ RATE = 44100
 """int:bitrate of the audio"""
 ENC = enums.RecognitionConfig.AudioEncoding.LINEAR16
 """google.cloud.speech.enums.RecognitionConfig.AudioEncoding: audio encoding"""
+NUMBER_OF_AUDIO_CHANNELS = 2 
 
 
 class ASRClient:
@@ -56,7 +56,7 @@ class ASRClient:
         self.begin = datetime.datetime.now()
         self.client = speech.SpeechClient()
         self.buffer = multiprocessing.Queue()
-        p1= multiprocessing.Process(target=self.simulate_record_and_send,args=(filename,self.buffer,))
+        p1= multiprocessing.Process(target=self.simulate_record_and_store_in_buffer,args=(filename,self.buffer,))
         p2= multiprocessing.Process(target=self.run_receive_and_print,args=(self.buffer,))
         p1.start()
         p2.start()
@@ -77,8 +77,9 @@ class ASRClient:
                 yield chunk.raw_data
         
     
-    def simulate_record_and_send(self,filename,multiprocessing_buffer):
-        # send the audio chunk by chunk between 100ms intervals.
+    def simulate_record_and_store_in_buffer(self,filename,multiprocessing_buffer):
+        
+        """ takes the audio generator (in our case a simple generator from a file) and uses it to fill the buffer"""
 
         audio_generator = self.audio_chunks_from_file_generator(filename)
         for chunk in audio_generator:
@@ -91,7 +92,7 @@ class ASRClient:
             encoding=encoding,
             sample_rate_hertz=rate,
             language_code=lang,
-            audio_channel_count = 2)
+            audio_channel_count = NUMBER_OF_AUDIO_CHANNELS)
 
         streaming_config = types.StreamingRecognitionConfig(
             config=config,
@@ -104,9 +105,9 @@ class ASRClient:
     def myGenerator(self, q):
         ''' Turns given a given queue into a generator object.
 
-            In other words it takes the buffer and makes a stream out of it.
-            It is used to stream incoming audio to Google for transcribing.
-            '''
+        In other words it takes the buffer and makes a stream out of it.
+        It is used to stream incoming audio to Google for transcribing.
+        '''
         while True:
             # Use a blocking get() to ensure there's at least one chunk of
             # data, and stop iteration if the chunk is None, indicating the
@@ -138,7 +139,6 @@ class ASRClient:
         three generators 
         '''
         try:
-            print(str(self.begin))
             logging.info("Starting process {}".format(os.getpid()))
             streaming_config = self.generate_google_streaming_configuration(lang=LANG, rate=RATE, encoding=ENC, single_ut=False)
 
@@ -158,6 +158,8 @@ class ASRClient:
             print(str(datetime.datetime.now()- self.begin))
             traceback.print_exc()
             print(str(e))
+            return 
+
         print(str(datetime.datetime.now()- self.begin))
 
 
