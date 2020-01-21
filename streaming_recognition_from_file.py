@@ -43,7 +43,7 @@ import traceback
 LANG = 'el-GR'
 """string: spoken language to be recognized"""
 RATE = 44100
-"""int:bitrate of the audio"""
+"""int:samplingrate of the audio"""
 ENC = enums.RecognitionConfig.AudioEncoding.LINEAR16
 """google.cloud.speech.enums.RecognitionConfig.AudioEncoding: audio encoding"""
 NUMBER_OF_AUDIO_CHANNELS = 2 
