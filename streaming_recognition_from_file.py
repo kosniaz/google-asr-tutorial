@@ -5,6 +5,7 @@ from __future__ import division
 import re
 import argparse
 import pyaudio
+import datetime
 import logging
 from six.moves import queue
 from websocket import create_connection
@@ -19,18 +20,15 @@ import argparse
 import os
 import sys
 import google
+import traceback
 
 
-
-
-
-''' This script takes a single channel wav file as an argument, and
-    streams it to google for transcribing 
-    It can be used with flag --no_interim.
+''' This script takes a stereo wav file as an argument, and
+    streams it to google for transcribing.
     
     Here we instantiate an ASR client. Then main() calls method run().
     In essence, this method activates the client. It spawns two processes.
-    One (run_record_and_send() ) is for sending the audio chunk by chunk between 100ms intervals.
+    One (simulate_record_and_store_in_buffer() ) is for sending the audio chunk by chunk between 100ms intervals.
     The other (run_receive_and_print) is for handling the incoming responses from the asr server.
 
     Arguments:
@@ -48,15 +46,17 @@ RATE = 44100
 """int:bitrate of the audio"""
 ENC = enums.RecognitionConfig.AudioEncoding.LINEAR16
 """google.cloud.speech.enums.RecognitionConfig.AudioEncoding: audio encoding"""
+NUMBER_OF_AUDIO_CHANNELS = 2 
 
 
 class ASRClient:
 
     def run(self,filename,no_interim):
         #main function
+        self.begin = datetime.datetime.now()
         self.client = speech.SpeechClient()
         self.buffer = multiprocessing.Queue()
-        p1= multiprocessing.Process(target=self.simulate_record_and_send,args=(filename,self.buffer,))
+        p1= multiprocessing.Process(target=self.simulate_record_and_store_in_buffer,args=(filename,self.buffer,))
         p2= multiprocessing.Process(target=self.run_receive_and_print,args=(self.buffer,))
         p1.start()
         p2.start()
@@ -77,8 +77,9 @@ class ASRClient:
                 yield chunk.raw_data
         
     
-    def simulate_record_and_send(self,filename,multiprocessing_buffer):
-        # send the audio chunk by chunk between 100ms intervals.
+    def simulate_record_and_store_in_buffer(self,filename,multiprocessing_buffer):
+        
+        """ takes the audio generator (in our case a simple generator from a file) and uses it to fill the buffer"""
 
         audio_generator = self.audio_chunks_from_file_generator(filename)
         for chunk in audio_generator:
@@ -91,7 +92,7 @@ class ASRClient:
             encoding=encoding,
             sample_rate_hertz=rate,
             language_code=lang,
-            audio_channel_count = 2)
+            audio_channel_count = NUMBER_OF_AUDIO_CHANNELS)
 
         streaming_config = types.StreamingRecognitionConfig(
             config=config,
@@ -104,9 +105,9 @@ class ASRClient:
     def myGenerator(self, q):
         ''' Turns given a given queue into a generator object.
 
-            In other words it takes the buffer and makes a stream out of it.
-            It is used to stream incoming audio to Google for transcribing.
-            '''
+        In other words it takes the buffer and makes a stream out of it.
+        It is used to stream incoming audio to Google for transcribing.
+        '''
         while True:
             # Use a blocking get() to ensure there's at least one chunk of
             # data, and stop iteration if the chunk is None, indicating the
@@ -137,17 +138,29 @@ class ASRClient:
         sending it to google, receiving the result and printing it out. This is done by connecting 
         three generators 
         '''
+        try:
+            logging.info("Starting process {}".format(os.getpid()))
+            streaming_config = self.generate_google_streaming_configuration(lang=LANG, rate=RATE, encoding=ENC, single_ut=False)
 
-        logging.info("Starting process {}".format(os.getpid()))
-        streaming_config = self.generate_google_streaming_configuration(lang=LANG, rate=RATE, encoding=ENC, single_ut=False)
+            # set generator of chunks
+            input_buffer_stream = self.myGenerator(communication_q)
+            
+            # using the **generator expression** : from generator of chunks to generator of requests 
+            requests = (types.StreamingRecognizeRequest(audio_content=content)
+                        for content in input_buffer_stream)
+            
+            # google's streaming_recognize returns a generator expression
+            responses = self.client.streaming_recognize(streaming_config, requests, timeout=120)
+            self.listen_print_loop(responses=responses)
 
-        input_buffer_stream = self.myGenerator(communication_q)
-        requests = (types.StreamingRecognizeRequest(audio_content=content)
-                    for content in input_buffer_stream)
-        responses = self.client.streaming_recognize(streaming_config, requests, timeout=30)
-        self.listen_print_loop(responses=responses)
+            logging.info("Terminating process {}".format(os.getpid()))
+        except Exception as e:
+            print(str(datetime.datetime.now()- self.begin))
+            traceback.print_exc()
+            print(str(e))
+            return 
 
-        logging.info("Terminating process {}".format(os.getpid()))
+        print(str(datetime.datetime.now()- self.begin))
 
 
 
@@ -172,50 +185,32 @@ class ASRClient:
         final one, print a newline to preserve the finalized transcription.
         """
 
-        has_stopped_receiving = False
-        num_chars_printed = 0
         for response in responses:
-            if not response.results:
+            # The `results` list is consecutive. For streaming, we only care about
+            # the first result being considered, since once it's `is_final`, it
+            # moves on to considering the next utterance.
+            if response.results: 
+                result = response.results[0]
+                if not result.alternatives:
+                    continue
+
+                # Display the transcription of the top alternative.
+                transcript = result.alternatives[0].transcript
+                if not result.is_final:
+                    print("interim: "+ transcript)
+                else:
+                    print(transcript)
+            else: 
                 if response.speech_event_type:
                     if response.speech_event_type == types.StreamingRecognizeResponse.END_OF_SINGLE_UTTERANCE:
                         has_stopped_receiving = True
                         print("recvd end of single utterance")
-                continue
-
-            if response.error:
-                if response.error.code != 0:
-                    logging.error("Google returned error {}: {}".format(
-                        response.error.code, response.error.message))
-                    # breaking this loop essentially terminates the process.
-                    break
-
-            # The `results` list is consecutive. For streaming, we only care about
-            # the first result being considered, since once it's `is_final`, it
-            # moves on to considering the next utterance.
-            result = response.results[0]
-            if not result.alternatives:
-                continue
-
-            # Display the transcription of the top alternative.
-            transcript = result.alternatives[0].transcript
-
-            # Display interim results, but with a carriage return at the end of the
-            # line, so subsequent lines will overwrite them.
-            #
-            # If the previous result was longer than this one, we need to print
-            # some extra spaces to overwrite the previous result
-            overwrite_chars = ' ' * (num_chars_printed - len(transcript))
-
-            if not result.is_final:
-                sys.stdout.write(transcript + overwrite_chars + '\r')
-                sys.stdout.flush()
-                print("_INTERIM: " + transcript + overwrite_chars)
-                num_chars_printed = len(transcript)
-
-            else:
-                logging.info('Got final transcript: "' +
-                             transcript + overwrite_chars + '"')
-                print(transcript + overwrite_chars)
+                elif response.error:
+                    if response.error.code != 0:
+                        print("Google returned error {}: {}".format(
+                            response.error.code, response.error.message))
+                        # breaking this loop essentially terminates the process.
+                        break
 
     
 
