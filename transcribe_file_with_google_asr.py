@@ -36,6 +36,9 @@ def transcribe_file(filename):
     config = generate_google_configuration(LANG,RATE,ENC)
     with open(filename,'rb') as audiofile:
         audio = types.RecognitionAudio(content=audiofile.read())
+
+    audio = {"uri": "gs://test-bucket-mystery/out3.wav"}
+
     
     operation = client.long_running_recognize(config, audio)
 
