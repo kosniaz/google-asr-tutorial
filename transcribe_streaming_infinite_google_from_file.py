@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 
-# Copyright 2019 Google LLC
+# clopy-right 
+
+# Copyright 2019 Google LLC ^H^H^H^H^H^H^H^H^H^H^H^H^H^H^H^H^H^H^H^H^H^H^H^H^H^H^H^H^H^H Clopy-right Kosmas Palios
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Google Cloud Speech API sample application using the streaming API.
+""" This script streams a wav file to google cloud and 
 
 NOTE: This module requires the dependencies `pyaudio` and `termcolor`.
 To install using pip:
@@ -23,7 +25,7 @@ To install using pip:
     pip install termcolor
 
 Example usage:
-    python transcribe_streaming_infinite.py
+    python transcribe_streaming_infinite_from_file.py filename.wav supertiles_file.txt
 
 
 
@@ -35,13 +37,15 @@ How to improve:
 
 import time
 import re
+import difflib
 import sys
 
 # uses result_end_time currently only avaialble in v1p1beta, will be in v1 soon
 from google.cloud import speech_v1p1beta1 as speech
-import pyaudio
+
 from six.moves import queue
 import threading
+import argparse
 import queue
 from pydub import AudioSegment
 from pydub.utils import make_chunks
@@ -49,30 +53,59 @@ from google.cloud.speech import enums
 from google.cloud.speech import types
 import google
 
-# Audio recording parameters
-STREAMING_LIMIT = 10000
+# Audio parameters
 SAMPLE_RATE = 41000
 CHUNK_SIZE = int(SAMPLE_RATE / 10)  # 100ms
+RESTART_CONNECTION_CHUNKS_LOST = 2
 
-RED = '\033[0;31m'
-GREEN = '\033[0;32m'
-YELLOW = '\033[0;33m'
+# Streaming parameters
+MAX_PHRASES_PER_CONNECTION = 1
+STREAMING_LIMIT = 15000
+
+
+
+# supertitle generation parametrs
+CONFIDENCE_THRESHOLD = 0.4
+# RED = '\033[0;31m'
+# GREEN = '\033[0;32m'
+# YELLOW = '\033[0;33m'
+RED = ''
+GREEN = ''
+YELLOW = ''
 opened_time = None
+
+
+def format_time_string(elapsed):
+    elapsed_min = elapsed//60000
+    elapsed_sec = elapsed//1000 - elapsed_min*60
+    elapsed_milli = elapsed%1000
+    corrected_time = str(elapsed_min)+'.'+str(elapsed_sec)+'.'+str(elapsed_milli)
+    return corrected_time
 
 def get_current_time():
     """Return Current Time in MS."""
 
     return int(round(time.time() * 1000))
 
+def read_supertitles_from_file(filename):
+    supertitles=[]
+    with open(filename,'r') as fp:
+        for cnt, line in enumerate(fp):
+            supertitles.append(line.strip())
+        
+    print(supertitles)
+    return supertitles
 
-class ResumableMicrophoneStream:
+
+
+class FileStream:
     """Opens a recording stream as a generator yielding the audio chunks."""
 
-    def __init__(self, rate, chunk_size,filename):
+    def __init__(self, rate, chunk_size,filename,sup_filename):
         self._rate = rate
         self.chunk_size = chunk_size
         self._num_channels = 1
-        self._buff = queue.Queue()
+
         self.closed = True
         self.previous_start_time=-1
         self.start_time = get_current_time()
@@ -85,22 +118,38 @@ class ResumableMicrophoneStream:
         self.bridging_offset_of_current_round = 0
         self.last_transcript_was_final = False
         self.new_stream = True
-        self._audio_interface = pyaudio.PyAudio()
-        self._audio_stream = self._audio_interface.open(
-            format=pyaudio.paInt16,
-            channels=self._num_channels,
-            rate=self._rate,
-            input=True,
-            frames_per_buffer=self.chunk_size,
-            # Run the audio stream asynchronously to fill the buffer object.
-            # This is necessary so that the input device's buffer doesn't
-            # overflow while the calling thread makes network requests, etc.
-            stream_callback=self._fill_buffer,
-        )
 
         self.in_buffer = queue.Queue() # threadsafe queue
         self.filename = filename
-        self.continue_without_history= False
+        self.deadline_exceeded= False
+        self.streaming_limit_exceeded= False
+        self.previous_connections_time = 0
+        self.current_supertitle = ""
+        self.supertitle_index = 0 
+        self.supertitles = read_supertitles_from_file(sup_filename)
+    
+    
+
+
+    def get_most_probable_supertitle(self,transcript,cutoff):
+
+        # use difflib
+        length = len(transcript)
+        #print(transcript)
+        supertitle_window = [x for i,x in enumerate(self.supertitles) if abs(i-self.supertitle_index) < 6]
+        prefix_list = [ x[:length+10] for x in supertitle_window]
+        closest_supertitles = difflib.get_close_matches(transcript,prefix_list, cutoff = cutoff)
+        #print(transcript + " in " + str(prefix_list))
+        #print(closest_supertitles)
+        if len(closest_supertitles)==0:
+            return "NO_SUPERTITLE AVAILABLE"
+        else:
+            supertitle_pre = closest_supertitles[0]
+            list_of_results = [ x for x in supertitle_window if x[:length+10] == supertitle_pre ]
+            index_of_result= [ i for i,x in enumerate(self.supertitles) if x == list_of_results[0] ]
+            self.supertitle_index = index_of_result[0]
+            return list_of_results[0]
+
        
     def __enter__(self):
         print(self.filename)
@@ -112,19 +161,9 @@ class ResumableMicrophoneStream:
 
     def __exit__(self, type, value, traceback):
 
-        self._audio_stream.stop_stream()
-        self._audio_stream.close()
         self.closed = True
         # Signal the generator to terminate so that the client's
         # streaming_recognize method will not block the process termination.
-        self._buff.put(None)
-        self._audio_interface.terminate()
-
-    def _fill_buffer(self, in_data, *args, **kwargs):
-        """Continuously collect data from the audio stream, into the buffer."""
-
-        self._buff.put(in_data)
-        return None, pyaudio.paContinue
     
 
     
@@ -149,51 +188,57 @@ class ResumableMicrophoneStream:
         for chunk in audio_generator:
             in_buffer.put(chunk)
 
-    def get_next_audio_chunk(self):
+    def get_next_audio_chunk(self,block=True):
         return self.in_buffer.get() # blocking get
 
     def get_next_audio_chunk_non_blocking(self):
         return self.in_buffer.get(False) # non_blocking get
 
     def generator(self):
-        """Stream Audio from microphone to API and to local buffer"""
+        """Stream Audio from file to local buffer"""
 
         while not self.closed:
             data = []
 
             if self.new_stream and self.last_audio_input:
 
-                # use a file?
-                # modified this to get to the correct point.
-                chunk_time = (self.start_time-self.previous_start_time) / len(self.last_audio_input)
+                if self.deadline_exceeded:
+                    self.deadline_exceeded=False
+                    last_audio_length = len(self.last_audio_input)
+                    for i in range(last_audio_length - RESTART_CONNECTION_CHUNKS_LOST, last_audio_length):
+                        data.append(self.last_audio_input[i])
+                    self.bridging_offset_of_current_round = int(SAMPLE_RATE/ CHUNK_SIZE) *  RESTART_CONNECTION_CHUNKS_LOST
+                else: 
+                    self.streaming_limit_exceeded = False
+                    chunk_time = (self.start_time-self.previous_start_time) / len(self.last_audio_input)
 
-                if chunk_time != 0:
+                    if chunk_time != 0:
 
-                    if self.bridging_offset_of_current_round < 0:
-                        self.bridging_offset_of_current_round = 0
+                        if self.bridging_offset_of_current_round < 0:
+                            self.bridging_offset_of_current_round = 0
 
-                    if self.bridging_offset_of_current_round > self.final_request_end_time:
-                        self.bridging_offset_of_current_round = self.final_request_end_time
+                        if self.bridging_offset_of_current_round > self.final_request_end_time:
+                            self.bridging_offset_of_current_round = self.final_request_end_time
 
-                    chunks_from_ms = round((self.final_request_end_time -
-                                            self.bridging_offset_of_current_round) / chunk_time)
-                    # chunks from ms are the chunks that were sent and recognized
+                        chunks_from_ms = round((self.final_request_end_time -
+                                                self.bridging_offset_of_current_round) / chunk_time)
+                        # chunks from ms are the chunks that were sent and recognized
 
-                    self.bridging_offset_of_current_round = (round((
-                        len(self.last_audio_input) - chunks_from_ms)
-                                                  * chunk_time))
+                        self.bridging_offset_of_current_round = (round((
+                            len(self.last_audio_input) - chunks_from_ms)
+                                                    * chunk_time))
+                
                     # bridging offset is the estimated time of audio that will be re-sent to 
                     # google this time
                     # note that this data does not get inserted into audio_input[].
                     # now insert self.last_audio_input[chunks_from_ms:] to data
                     for i in range(chunks_from_ms, len(self.last_audio_input)):
                         data.append(self.last_audio_input[i])
-                    
+                
                 self.new_stream = False
                 
             
-            # TODO: continue from here biyotch
-
+            # TODO: continue from here 
             # Use a blocking get() to ensure there's at least one chunk of
             # data, and stop iteration if the chunk is None, indicating the
             # end of the audio stream.
@@ -217,7 +262,6 @@ class ResumableMicrophoneStream:
                     self.audio_input.append(chunk)
 
                 except queue.Empty:
-                    #
                     break
             yield b''.join(data)
 
@@ -243,19 +287,20 @@ def listen_print_loop(responses, stream):
     # print(stream.start_time)
     # print(get_current_time()-stream.start_time)
     try:
-        
+        sups = []
         for response in responses:
             
             # termination condition 
             if get_current_time() - stream.start_time > STREAMING_LIMIT:
                 stream.previous_start_time= stream.start_time
                 stream.start_time = get_current_time()
+                stream.streaming_limit_exceeded=True
                 break
 
             
             if phrases_identified == 2:
                 stream.previous_start_time= stream.start_time
-                sys.stdout.write("passed" + str(get_current_time()-stream.start_time) + '\n')
+                #sys.stdout.write("elapsed " + str(get_current_time()-stream.start_time) + '\n')
                 stream.start_time = get_current_time()
                 break
 
@@ -281,8 +326,11 @@ def listen_print_loop(responses, stream):
             stream.result_end_time = int((result_seconds * 1000)
                                         + (result_nanos / 1000000))
 
-            corrected_time = (stream.result_end_time - stream.bridging_offset_of_current_round
-                            + (STREAMING_LIMIT * stream.restart_counter))
+
+            # the number below doesn't work. because the bridging offset of current round is often over-estimated
+            #corrected_time = stream.result_end_time - stream.bridging_offset_of_current_round+ stream.previous_connections_time
+            corrected_time = format_time_string(get_current_time()-opened_time)
+            
             
             # Display interim results, but with a carriage return at the end of the
             # line, so subsequent lines will overwrite them.
@@ -290,38 +338,69 @@ def listen_print_loop(responses, stream):
             if result.is_final:
                 phrases_identified+=1
                 sys.stdout.write(GREEN)
-                sys.stdout.write('\033[K')
-                sys.stdout.write(str(corrected_time) + ': ' + transcript + '\n')
+                new_supertitle = stream.get_most_probable_supertitle(transcript, CONFIDENCE_THRESHOLD)
+                # append to the list of supertitles for this phrase (phrase end is determined by Google ASR)
+                sups.append(new_supertitle)
+                if len(sups)==1 :
+                    # if this is our first guess, just print it!
+                    stream.current_supertitle = str(corrected_time) + ": " +  new_supertitle
+                    print(stream.current_supertitle) 
+                elif sups[-1] != sups[-2]:
+                    # only print the supertitle if it is different from the previous one
+                    stream.current_supertitle = str(corrected_time) + ": " +  new_supertitle
+                    print(stream.current_supertitle)
+
+                #sys.stdout.write(stream.current_supertitle + "  " + str(corrected_time) + ': ' + transcript + '\n')
                 #sys.stdout.write(str(get_current_time()-start_time) + '\n')
                 stream.is_final_end_time = stream.result_end_time
                 stream.last_transcript_was_final = True
-
-                # Exit recognition if any of the transcribed phrases could be
-                # one of our keywords.
-                if re.search(r'\b(exit|quit)\b', transcript, re.I):
-                    sys.stdout.write(YELLOW)
-                    sys.stdout.write('Exiting...\n')
-                    stream.closed = True
-                    break
-
+                sups = []
+                stream.current_supertitle=''
+                if phrases_identified == MAX_PHRASES_PER_CONNECTION:
+                    stream.previous_start_time= stream.start_time
+                    stream.start_time = get_current_time()
+                    break 
             else:
-                sys.stdout.write(RED)
-                sys.stdout.write('\033[K')
-                sys.stdout.write(str(corrected_time) + ': ' + transcript + '\r')
-
+                #INTERIM RESULT
+                new_supertitle = stream.get_most_probable_supertitle(transcript, CONFIDENCE_THRESHOLD)
+                sups.append(new_supertitle)
+                
+                # the triple if below ensures that the same phrase will not be printed two times consequently
+                # all the while not permitting single "uncertainty spikes" (i.e. single "NO_SUPERTITLE_AVAILABLE" supertitles
+                # among supertitle guesses) to cause instability
+                #
+                # ...sorry for the complexity!
+                if len(sups) > 1:
+                    if sups[-1] != sups[-2]:
+                        if new_supertitle != 'NO_SUPERTITLE_AVAILABLE':
+                            stream.current_supertitle = str(corrected_time) + ": " +  new_supertitle
+                            print(stream.current_supertitle) 
+                        else:
+                            if sups[-2] == 'NO_SUPERTITLE_AVAILABLE':
+                                stream.current_supertitle = str(corrected_time) + ": NO_SUPERTITLE_AVAILABLE"
+                                print(stream.current_supertitle) 
+                else:
+                    # if this is our first guess, just print it!
+                    stream.current_supertitle = str(corrected_time) + ": " +  new_supertitle
+                    print(stream.current_supertitle) 
+                
+                #sys.stdout.write(stream.current_supertitle + "   " + str(corrected_time) + ': ' + transcript + '\r')
                 stream.last_transcript_was_final = False
+
     except google.api_core.exceptions.DeadlineExceeded:
         print("got deadline exceeded error, restarting the connection..")
         # clear the buffer and restart everything
         stream.previous_start_time= stream.start_time
         stream.start_time = get_current_time()
-        stream.continue_without_history = True
-              
-
+        stream.deadline_exceeded = True
 
 def main():
     """start bidirectional streaming from microphone input to speech API"""
     global opened_time
+    parser = argparse.ArgumentParser()
+    parser.add_argument("filename", type=str, help="source file")
+    parser.add_argument("supertitles_filename", type=str, help="supertitles file, one supertitle per line")
+    args=parser.parse_args()
     client = speech.SpeechClient()
     config = speech.types.RecognitionConfig(
         encoding=speech.enums.RecognitionConfig.AudioEncoding.LINEAR16,
@@ -332,20 +411,21 @@ def main():
     streaming_config = speech.types.StreamingRecognitionConfig(
         config=config,
         interim_results=True)
-    filename= "out4.wav"
-    mic_manager = ResumableMicrophoneStream(SAMPLE_RATE, CHUNK_SIZE, filename)
-    print(mic_manager.chunk_size)
+
+    stream_manager = FileStream(SAMPLE_RATE, CHUNK_SIZE, args.filename,args.supertitles_filename)
+    print(stream_manager.chunk_size)
     sys.stdout.write(YELLOW)
     sys.stdout.write('\nListening, say "Quit" or "Exit" to stop.\n\n')
     sys.stdout.write('End (ms)       Transcript Results/Status\n')
     sys.stdout.write('=====================================================\n')
-    with mic_manager as stream:
+    with stream_manager as stream:
 
         opened_time = get_current_time()
         while not stream.closed:
-            sys.stdout.write(YELLOW)
-            sys.stdout.write('\n' + str(
-                get_current_time()-opened_time) + ': NEW REQUEST\n')
+            # if verbose:
+            #     sys.stdout.write(YELLOW)
+            #     sys.stdout.write('\n' + str(
+            #         get_current_time()-opened_time) + " (" + str(stream.previous_connections_time) + '): NEW REQUEST\n')
 
             stream.audio_input = []
             audio_generator = stream.generator()
@@ -363,12 +443,17 @@ def main():
                 stream.final_request_end_time = stream.is_final_end_time
             stream.result_end_time = 0
             stream.last_audio_input = []
-            if stream.continue_without_history == False:
-                stream.last_audio_input = stream.audio_input
-            else:
+            stream.last_audio_input = stream.audio_input
+            if stream.deadline_exceeded == False and stream.streaming_limit_exceeded == False:
+                # previous connection stopped at last final result
+                stream.previous_connections_time += stream.is_final_end_time
+            elif stream.streaming_limit_exceeded: # stream.streaming_limit_exceeded is False
                 ## need to handle this better, perhaps include noise that has not been repeated.
-                stream.continue_without_history=False
-                stream.last_audio_input = stream.last_audio_input[-20:]
+                stream.previous_connections_time+= 20000 # TODO: improve accuracy?
+            else: #stream.streaming_limit_exceeded is True
+                stream.previous_connections_time+= STREAMING_LIMIT
+         
+
             stream.audio_input = []
             stream.restart_counter = stream.restart_counter + 1
 
